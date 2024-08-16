@@ -15,7 +15,7 @@ root.title("Advanced Tsunami Simulation with Realistic Coastal Area")
 
 box_height = 600
 box_width = 1200
-water_height = 200  # Tinggi air awal
+water_height = 200  
 land_width = 300
 num_particles = 1000
 wave_points = 300
@@ -25,18 +25,18 @@ houses = []
 canvas = tk.Canvas(root, width=box_width, height=box_height, bg="lightblue")
 canvas.pack(side=tk.LEFT)
 
-box = canvas.create_rectangle(0, 0, box_width, box_height, outline="black", fill="white")
+sea_polygon = canvas.create_polygon(0, 0, fill="blue", outline="")
+
+wave = canvas.create_line(0, 0, 0, 0, fill="white", width=2)
 
 def create_terrain():
-    base_height = box_height - 250  # Tinggi dasar dataran ditinggikan
+    base_height = box_height - 250 
     terrain_points = [(0, box_height)]
     
-    # Membuat dataran utama yang rata
     for x in range(0, land_width, 10):
-        y = base_height + random.randint(-5, 5)  # Sedikit variasi untuk tekstur alami
+        y = base_height + random.randint(-5, 5) 
         terrain_points.append((x, y))
     
-    # Membuat lereng menuju laut
     slope_start = land_width - 50
     for x in range(slope_start, land_width + 10, 10):
         progress = (x - slope_start) / 50
@@ -76,27 +76,22 @@ class House:
         ground_level = get_terrain_height(self.x + self.width / 2)
         
         if self.y + self.height > water_level:
-            # House is in water
             buoyancy = (self.y + self.height - water_level) * 0.1
             self.velocity -= buoyancy
-            self.velocity += 0.2  # Reduced gravity effect in water
+            self.velocity += 0.2  
         else:
-            # House is above water
-            self.velocity += 0.5  # Normal gravity
+            self.velocity += 0.5  
 
-        self.velocity += random.uniform(-earthquake_intensity, earthquake_intensity)  # Earthquake effect
+        self.velocity += random.uniform(-earthquake_intensity, earthquake_intensity) 
         self.y += self.velocity
 
-        # Collision with ground
         if self.y + self.height > ground_level:
             self.y = ground_level - self.height
-            self.velocity = -self.velocity * 0.3  # Bounce with significant energy loss
+            self.velocity = -self.velocity * 0.3  
 
-        # Horizontal movement due to water current or earthquake
         if self.y + self.height > water_level:
             self.x += random.uniform(-1, 1) * (earthquake_intensity + 0.1)
         
-        # Keep house within land bounds
         self.x = max(0, min(self.x, land_width - self.width))
 
         canvas.coords(self.shape, self.x, self.y, self.x + self.width, self.y + self.height)
@@ -106,23 +101,19 @@ class House:
             self.x + self.width, self.y
         )
 
-# Create houses on the flat terrain
 num_houses = 5
 house_width = 40
 house_height = 60
 for i in range(num_houses):
-    x = random.uniform(20, land_width - 100)  # Avoiding placement on the slope
+    x = random.uniform(20, land_width - 100) 
     y = get_terrain_height(x) - house_height
     house = House(x, y, house_width, house_height)
     houses.append(house)
 
-wave = [canvas.create_line(0, 0, 0, 0, fill="blue") for _ in range(wave_points)]
-
-# Initialize particles
 for _ in range(num_particles):
-    x = random.uniform(land_width, box_width)
+    x = random.uniform(0, box_width)
     y = random.uniform(box_height - water_height, box_height)
-    particles.append(canvas.create_oval(x-2, y-2, x+2, y+2, fill="blue", outline=""))
+    particles.append(canvas.create_oval(x-2, y-2, x+2, y+2, fill="lightblue", outline=""))
 
 def generate_data(water_height, earthquake_intensity):
     distance = water_height
@@ -182,20 +173,21 @@ def update_simulation():
             tsunami_phase = 0
     
     wave_height = water_height
-    x = np.linspace(land_width, box_width, wave_points)
+    x = np.linspace(0, box_width, 200)
     y = box_height - wave_height + np.sin(x/100 + time) * 10 * (1 + earthquake_intensity*5)
     y += np.sin(x/50 - time*1.5) * 5 * (1 + earthquake_intensity*3)
     y += np.sin(x/25 + time*2) * 3 * (1 + earthquake_intensity*2)
     
-    y += np.random.normal(0, earthquake_intensity * 10 + (tsunami_active * 20), wave_points)
+    y += np.random.normal(0, earthquake_intensity * 10 + (tsunami_active * 20), 200)
     
-    # Update wave visual
-    for i, point in enumerate(wave):
-        if i < wave_points - 1:
-            canvas.coords(point, x[i], y[i], x[i+1], y[i+1])
+    sea_points = list(zip(x, y))
+    sea_points = [(0, box_height)] + sea_points + [(box_width, box_height)]
+    canvas.coords(sea_polygon, *[coord for point in sea_points for coord in point])
+    
+    wave_points = list(zip(x, y))
+    canvas.coords(wave, *[coord for point in wave_points for coord in point])
 
-    # Update particles (representing the water)
-    for i, particle in enumerate(particles):
+    for particle in particles:
         x1, y1, x2, y2 = canvas.coords(particle)
         center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
 
@@ -208,10 +200,10 @@ def update_simulation():
         new_y = center_y + dy
 
         # Contain within boundaries
-        if new_x < land_width:
+        if new_x < 0:
             new_x = box_width
         elif new_x > box_width:
-            new_x = land_width
+            new_x = 0
 
         if new_y < box_height - water_height - 50:
             new_y = box_height - 5
@@ -220,10 +212,18 @@ def update_simulation():
 
         canvas.coords(particle, new_x-2, new_y-2, new_x+2, new_y+2)
 
-    # Update houses
     water_level = box_height - water_height
     for house in houses:
         house.update(water_level, earthquake_intensity)
+
+    canvas.tag_raise(sea_polygon)
+    canvas.tag_raise(wave)
+    for particle in particles:
+        canvas.tag_raise(particle)
+    canvas.tag_raise(land)
+    for house in houses:
+        canvas.tag_raise(house.shape)
+        canvas.tag_raise(house.roof)
 
     root.after(50, update_simulation)
 
@@ -244,23 +244,19 @@ def update_water_level(y):
         water_height = new_height
 
 def on_click(event):
-    if event.x > land_width:
-        update_water_level(event.y)
+    update_water_level(event.y)
 
 def on_drag(event):
-    if event.x > land_width:
-        update_water_level(event.y)
+    update_water_level(event.y)
 
 def trigger_tsunami():
     global tsunami_active, tsunami_phase
     tsunami_active = True
     tsunami_phase = 0
 
-# Bind the mouse click and drag events to the canvas
 canvas.bind("<Button-1>", on_click)
 canvas.bind("<B1-Motion>", on_drag)
 
-# Create control panel frame
 control_panel = tk.Frame(root)
 control_panel.pack(side=tk.RIGHT, padx=10, pady=10)
 
