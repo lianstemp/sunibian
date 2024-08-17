@@ -155,46 +155,74 @@ earthquake_intensity = 0
 time = 0
 tsunami_phase = 0
 tsunami_active = False
+tsunami_wave_position = box_width
 
 def update_simulation():
-    global particles, earthquake_intensity, time, water_height, tsunami_phase, tsunami_active
+    global particles, earthquake_intensity, time, water_height, tsunami_phase, tsunami_active, tsunami_wave_position
 
     time += 0.1
     
     if tsunami_active:
-        if tsunami_phase < 100:  
-            water_height = max(50, 200 - tsunami_phase * 2)
+        if tsunami_phase < 200:  # Water receding phase (20 seconds)
+            water_height = max(50, 200 - tsunami_phase)
             tsunami_phase += 1
-        elif tsunami_phase < 200: 
-            water_height = min(550, 50 + (tsunami_phase - 100) * 8)
+        elif tsunami_phase < 400:  # Tsunami wave approaching phase (20 seconds)
+            tsunami_wave_position = max(0, box_width - (tsunami_phase - 200) * 3)
+            tsunami_phase += 1
+        elif tsunami_phase < 600:  # Tsunami impact and gradual retreat (20 seconds)
+            tsunami_wave_position = 0
+            water_height = min(550, 50 + (tsunami_phase - 400) * 2.5)
             tsunami_phase += 1
         else:
             tsunami_active = False
             tsunami_phase = 0
+            tsunami_wave_position = box_width
     
     wave_height = water_height
     x = np.linspace(0, box_width, 200)
-    y = box_height - wave_height + np.sin(x/100 + time) * 10 * (1 + earthquake_intensity*5)
-    y += np.sin(x/50 - time*1.5) * 5 * (1 + earthquake_intensity*3)
-    y += np.sin(x/25 + time*2) * 3 * (1 + earthquake_intensity*2)
     
-    y += np.random.normal(0, earthquake_intensity * 10 + (tsunami_active * 20), 200)
+    # Generate the smooth water surface (blue area)
+    y_water = box_height - wave_height + np.sin(x/100 + time) * 10
+    y_water += np.sin(x/50 - time*1.5) * 5
+    y_water += np.sin(x/25 + time*2) * 3
     
-    sea_points = list(zip(x, y))
+    # Add tsunami effect to water surface if active
+    if tsunami_active:
+        if tsunami_phase < 200:
+            # Water receding
+            y_water -= (200 - tsunami_phase) * 0.5
+        elif tsunami_phase < 400:
+            # Tsunami wave approaching
+            tsunami_wave = np.exp(-(x - tsunami_wave_position)**2 / (2 * 50000)) * 300
+            y_water += tsunami_wave
+        else:
+            # Tsunami impact and gradual retreat
+            y_water += (550 - water_height) * np.exp(-(x - tsunami_wave_position)**2 / (2 * 100000))
+    
+    # Create the sea polygon using the smooth water surface
+    sea_points = list(zip(x, y_water))
     sea_points = [(0, box_height)] + sea_points + [(box_width, box_height)]
     canvas.coords(sea_polygon, *[coord for point in sea_points for coord in point])
     
-    wave_points = list(zip(x, y))
+    # Generate the earthquake-affected wave (white line)
+    y_wave = y_water.copy()  # Start with the same shape as the water surface
+    y_wave += np.random.normal(0, earthquake_intensity * 10, 200)  # Add earthquake effect
+    
+    # Update the white wave line
+    wave_points = list(zip(x, y_wave))
     canvas.coords(wave, *[coord for point in wave_points for coord in point])
 
     for particle in particles:
         x1, y1, x2, y2 = canvas.coords(particle)
         center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
 
-        wave_height_at_x = np.interp(center_x, x, y)
+        wave_height_at_x = np.interp(center_x, x, y_water)
 
         dy = (wave_height_at_x - center_y) * 0.1
         dx = np.random.normal(0, earthquake_intensity * 5 + (tsunami_active * 10))
+
+        if tsunami_active and tsunami_phase >= 200:
+            dx -= 5  # Move particles towards the shore during tsunami
 
         new_x = center_x + dx
         new_y = center_y + dy
@@ -212,7 +240,7 @@ def update_simulation():
 
         canvas.coords(particle, new_x-2, new_y-2, new_x+2, new_y+2)
 
-    water_level = box_height - water_height
+    water_level = np.mean(y_water)  # Use the average water level
     for house in houses:
         house.update(water_level, earthquake_intensity)
 
@@ -250,9 +278,10 @@ def on_drag(event):
     update_water_level(event.y)
 
 def trigger_tsunami():
-    global tsunami_active, tsunami_phase
+    global tsunami_active, tsunami_phase, tsunami_wave_position
     tsunami_active = True
     tsunami_phase = 0
+    tsunami_wave_position = box_width
 
 canvas.bind("<Button-1>", on_click)
 canvas.bind("<B1-Motion>", on_drag)
