@@ -56,85 +56,55 @@ def get_terrain_height(x):
             return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
     return box_height
 
-class HousePart:
-    def __init__(self, canvas, x, y, width, height, color):
-        self.canvas = canvas
+class House:
+    def __init__(self, x, y, width, height):
         self.x = x
         self.y = y
         self.width = width
         self.height = height
-        self.color = color
-        self.velocity = [0, 0]
-        self.shape = canvas.create_rectangle(x, y, x + width, y + height, fill=color, outline="black")
+        self.velocity = 0
+        self.shape = canvas.create_rectangle(x, y, x + width, y + height, fill="brown")
+        self.roof = canvas.create_polygon(
+            x, y,
+            x + width // 2, y - height // 2,
+            x + width, y,
+            fill="red"
+        )
 
     def update(self, water_level, earthquake_intensity):
-        # Apply forces
-        buoyancy = max(0, (self.y + self.height - water_level) * 0.05)
-        gravity = 0.2
-        
-        self.velocity[0] += random.uniform(-earthquake_intensity, earthquake_intensity)
-        self.velocity[1] += gravity - buoyancy
-        
-        # Apply drag
-        drag = 0.98
-        self.velocity[0] *= drag
-        self.velocity[1] *= drag
-        
-        # Update position
-        self.x += self.velocity[0]
-        self.y += self.velocity[1]
-        
-        # Boundary checks
-        if self.x < 0 or self.x + self.width > land_width:
-            self.velocity[0] *= -0.5
-        
         ground_level = get_terrain_height(self.x + self.width / 2)
+        
+        if self.y + self.height > water_level:
+            buoyancy = (self.y + self.height - water_level) * 0.1
+            self.velocity -= buoyancy
+            self.velocity += 0.2  
+        else:
+            self.velocity += 0.5  
+
+        self.velocity += random.uniform(-earthquake_intensity, earthquake_intensity) 
+        self.y += self.velocity
+
         if self.y + self.height > ground_level:
             self.y = ground_level - self.height
-            self.velocity[1] *= -0.3
-        
-        # Update canvas
-        self.canvas.coords(self.shape, self.x, self.y, self.x + self.width, self.y + self.height)
+            self.velocity = -self.velocity * 0.3  
 
-class House:
-    def __init__(self, canvas, x, y, width, height):
-        self.canvas = canvas
-        self.x = x
-        self.y = y
-        self.width = width
-        self.height = height
-        self.parts = []
+        if self.y + self.height > water_level:
+            self.x += random.uniform(-1, 1) * (earthquake_intensity + 0.1)
         
-        # Create main structure
-        self.parts.append(HousePart(canvas, x, y, width, height * 0.7, "brown"))
-        
-        # Create roof
-        roof_height = height * 0.3
-        roof = canvas.create_polygon(
-            x, y,
-            x + width / 2, y - roof_height,
-            x + width, y,
-            fill="red", outline="black"
+        self.x = max(0, min(self.x, land_width - self.width))
+
+        canvas.coords(self.shape, self.x, self.y, self.x + self.width, self.y + self.height)
+        canvas.coords(self.roof,
+            self.x, self.y,
+            self.x + self.width // 2, self.y - self.height // 2,
+            self.x + self.width, self.y
         )
-        self.parts.append(HousePart(canvas, x, y - roof_height, width, roof_height, "red"))
-        
-        # Create windows
-        window_size = min(width, height) * 0.2
-        for i in range(2):
-            for j in range(2):
-                wx = x + (i + 0.5) * width / 3 - window_size / 2
-                wy = y + (j + 0.5) * height / 3
-                self.parts.append(HousePart(canvas, wx, wy, window_size, window_size, "lightblue"))
-
-    def update(self, water_level, earthquake_intensity):
-        for part in self.parts:
-            part.update(water_level, earthquake_intensity)
 
 num_houses = 5
 for _ in range(num_houses):
     x = random.uniform(20, land_width - 100)
     y = get_terrain_height(x) - 80
-    house = House(canvas, x, y, 60, 80)
+    house = House(x, y, 60, 80)
     houses.append(house)
 
 def create_particle(x, y):
@@ -173,53 +143,28 @@ earthquake_intensity = 0
 time = 0
 tsunami_phase = 0
 tsunami_active = False
-earthquake_active = False
-receding_phase = False
-earthquake_duration = 200
-receding_duration = 500
-wave_buildup_duration = 300
-wave_crash_duration = 400
-default_water_height = 200
-target_water_height = default_water_height
+tsunami_wave_position = box_width
 
 def update_simulation():
-    global particles, earthquake_intensity, time, water_height, tsunami_phase, tsunami_active, earthquake_active, receding_phase, target_water_height
+    global particles, earthquake_intensity, time, water_height, tsunami_phase, tsunami_active, tsunami_wave_position
 
     time += 0.1
     
-    if earthquake_active:
-        if tsunami_phase < earthquake_duration:
-            earthquake_intensity = min(1, earthquake_intensity + 0.01)
+    if tsunami_active:
+        if tsunami_phase < 200:  # Water receding phase (20 seconds)
+            water_height = max(50, 200 - tsunami_phase)
             tsunami_phase += 1
-        else:
-            earthquake_active = False
-            receding_phase = True
-            tsunami_phase = 0
-    elif tsunami_active:
-        if receding_phase:
-            earthquake_intensity = max(0, earthquake_intensity - 0.005)
-            if tsunami_phase < receding_duration:
-                target_water_height = max(50, default_water_height - tsunami_phase * 0.3)
-                tsunami_phase += 1
-            else:
-                receding_phase = False
-                tsunami_phase = 0
-        elif tsunami_phase < wave_buildup_duration:
-            target_water_height = min(550, 50 + (tsunami_phase / wave_buildup_duration) ** 2 * 500)
+        elif tsunami_phase < 400:  # Tsunami wave approaching phase (20 seconds)
+            tsunami_wave_position = max(0, box_width - (tsunami_phase - 200) * 3)
             tsunami_phase += 1
-        elif tsunami_phase < wave_buildup_duration + wave_crash_duration:
-            progress = (tsunami_phase - wave_buildup_duration) / wave_crash_duration
-            target_water_height = 550 - progress ** 0.5 * (550 - default_water_height)
+        elif tsunami_phase < 600:  # Tsunami impact and gradual retreat (20 seconds)
+            tsunami_wave_position = 0
+            water_height = min(550, 50 + (tsunami_phase - 400) * 2.5)
             tsunami_phase += 1
         else:
             tsunami_active = False
             tsunami_phase = 0
-            target_water_height = default_water_height
-    else:
-        earthquake_intensity = max(0, earthquake_intensity - 0.01)
-    
-    # Smoothly transition water height
-    water_height += (target_water_height - water_height) * 0.05
+            tsunami_wave_position = box_width
     
     wave_height = water_height
     x = np.linspace(0, box_width, 300)
@@ -229,13 +174,13 @@ def update_simulation():
     y_water += np.sin(x/25 + time*2) * 3
     
     if tsunami_active:
-        if receding_phase:
-            tsunami_wave = np.sin(x/200 + tsunami_phase/10) * 30 * (1 - tsunami_phase/receding_duration)
-            tsunami_wave *= np.exp(-(x - box_width)**2 / (2 * (box_width/2)**2))
+        if tsunami_phase < 200:
+            y_water -= (200 - tsunami_phase) * 0.5
+        elif tsunami_phase < 400:
+            tsunami_wave = np.exp(-(x - tsunami_wave_position)**2 / (2 * 50000)) * 300
+            y_water += tsunami_wave
         else:
-            tsunami_wave = np.sin(x/400 - tsunami_phase/20) * 100 * (tsunami_phase/wave_buildup_duration)
-            tsunami_wave *= np.exp(-(x - box_width)**2 / (2 * (box_width/4)**2))
-        y_water += tsunami_wave
+            y_water += (550 - water_height) * np.exp(-(x - tsunami_wave_position)**2 / (2 * 100000))
     
     sea_points = list(zip(x, y_water))
     sea_points = [(0, box_height)] + sea_points + [(box_width, box_height)]
@@ -252,13 +197,13 @@ def update_simulation():
         wave_height_at_x = np.interp(center_x, x, y_water)
 
         dy = (wave_height_at_x - center_y) * 0.1
-        dx = np.random.normal(0, earthquake_intensity * 2 + (tsunami_active * 5))
+        dx = np.random.normal(0, earthquake_intensity * 5 + (tsunami_active * 10))
 
         if tsunami_active:
-            if receding_phase:
-                dx += 2  # Move particles right during receding
+            if tsunami_phase < 200:
+                dx += 5  # Move particles towards the right during receding
             else:
-                dx -= 3  # Move particles left during tsunami wave
+                dx -= 10  # Move particles towards the left during tsunami wave
 
         new_x = center_x + dx
         new_y = center_y + dy
@@ -268,10 +213,10 @@ def update_simulation():
         elif new_x > box_width:
             new_x = 0
 
-        if new_y < box_height - water_height - 50:
+        if new_y < box_height - wave_height - 50:
             new_y = box_height - 5
         elif new_y > box_height:
-            new_y = box_height - water_height
+            new_y = box_height - wave_height
 
         canvas.coords(particle, new_x-2, new_y-2, new_x+2, new_y+2)
 
@@ -285,8 +230,8 @@ def update_simulation():
         canvas.tag_raise(particle)
     canvas.tag_raise(land)
     for house in houses:
-        for part in house.parts:
-            canvas.tag_raise(part.shape)
+        canvas.tag_raise(house.shape)
+        canvas.tag_raise(house.roof)
 
     root.after(50, update_simulation)
 
@@ -301,10 +246,10 @@ def update_intensity(value):
     earthquake_intensity = float(value)
 
 def update_water_level(y):
-    global target_water_height
+    global water_height
     new_height = box_height - y
     if 0 <= new_height <= box_height:
-        target_water_height = new_height
+        water_height = new_height
 
 def on_click(event):
     update_water_level(event.y)
@@ -313,12 +258,10 @@ def on_drag(event):
     update_water_level(event.y)
 
 def trigger_tsunami():
-    global tsunami_active, tsunami_phase, earthquake_active, receding_phase, earthquake_intensity
-    earthquake_active = True
+    global tsunami_active, tsunami_phase, tsunami_wave_position
     tsunami_active = True
     tsunami_phase = 0
-    receding_phase = False
-    earthquake_intensity = 0
+    tsunami_wave_position = box_width
 
 canvas.bind("<Button-1>", on_click)
 canvas.bind("<B1-Motion>", on_drag)
