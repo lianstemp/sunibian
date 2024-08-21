@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Ensures the full Git history is available
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v4
@@ -52,6 +54,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  
+
       - name: Download Linux Artifact
         uses: actions/download-artifact@v3
         with:
@@ -66,7 +73,6 @@ jobs:
 
       - name: Create Tag
         run: |
-          git fetch --prune --unshallow
           git tag -a v${{ github.run_number }} -m "Release v${{ github.run_number }}"
           git push origin --tags
 
