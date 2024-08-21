@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         include:
           - os: ubuntu-latest
-            extension: ''
+            extension: '.bin'
             pyinstaller_os: 'Linux'
           - os: windows-latest
             extension: '.exe'
@@ -35,16 +35,16 @@ jobs:
           pyinstaller --noconfirm --onefile simulator/main.py
         shell: bash
 
-      - name: Rename executable for Windows
-        if: matrix.os == 'windows-latest'
+      - name: Rename executable
         run: |
-          mv dist/main.exe dist/main${{ matrix.extension }}
+          mv dist/main dist/simulator${{ matrix.extension }}
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
           name: tsunami_simulator-${{ matrix.pyinstaller_os }}
-          path: dist/main${{ matrix.extension }}
+          path: dist/simulator${{ matrix.extension }}
 
   release:
     needs: build
@@ -86,7 +86,6 @@ jobs:
           else
             git tag v${{ steps.get_tag.outputs.new_version }}
             git push origin v${{ steps.get_tag.outputs.new_version }}
-          fi
 
       - name: Download Linux Artifact
         uses: actions/download-artifact@v3
@@ -107,7 +106,7 @@ jobs:
           draft: false
           prerelease: true
           files: |
-            artifacts/linux/main
-            artifacts/windows/main.exe
+            artifacts/linux/simulator.bin
+            artifacts/windows/simulator.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
