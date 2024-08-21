@@ -6,7 +6,6 @@ on:
       - main
 
 jobs:
-
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -19,55 +18,63 @@ jobs:
           - os: windows-latest
             extension: '.exe'
             pyinstaller_os: 'Windows'
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.12'
-    - name: Install PyInstaller
-      run: pip install pyinstaller
-    - name: Build executable
-      run: |
-        pyinstaller --noconfirm --onefile simulator/main.py
-      shell: bash
-    - name: Rename executable for Windows
-      if: matrix.os == 'windows-latest'
-      run: |
-        mv dist/main.exe dist/main${{ matrix.extension }}
-    - name: Upload artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: tsunami_simulator-${{ matrix.pyinstaller_os }}
-        path: dist/main${{ matrix.extension }}
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller --noconfirm --onefile simulator/main.py
+        shell: bash
+
+      - name: Rename executable for Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          mv dist/main.exe dist/main${{ matrix.extension }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tsunami_simulator-${{ matrix.pyinstaller_os }}
+          path: dist/main${{ matrix.extension }}
 
   release:
     needs: build
     runs-on: ubuntu-latest
+
     steps:
-    - name: Determine Release Tag
-      id: get_tag
-      run: |
-        LATEST_TAG=$(git describe --tags --abbrev=0)
-        NEW_TAG=$(date +'%Y-%m-%d-%H%M%S')
-        echo "::set-output name=tag::$NEW_TAG"
-    - name: Download Linux Artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: tsunami_simulator-Linux
-        path: artifacts/linux
-    - name: Download Windows Artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: tsunami_simulator-Windows
-        path: artifacts/windows
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          artifacts/linux/main
-          artifacts/windows/main.exe
-        tag_name: ${{ steps.get_tag.outputs.tag }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: tsunami_simulator-Linux
+          path: artifacts/linux
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: tsunami_simulator-Windows
+          path: artifacts/windows
+
+      - name: Create Tag
+        run: |
+          git fetch --prune --unshallow
+          git tag -a v${{ github.run_number }} -m "Release v${{ github.run_number }}"
+          git push origin --tags
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/linux/main
+            artifacts/windows/main.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
