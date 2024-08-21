@@ -56,14 +56,18 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
     
-    - name: Get latest tag
+    - name: Get latest tag or set initial version
       id: get_tag
       run: |
-        latest_tag=$(git describe --tags --abbrev=0)
-        version=$(echo $latest_tag | sed 's/^v//')
-        IFS='.' read -ra version_parts <<< "$version"
-        new_patch_version=$((${version_parts[2]}+1))
-        new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
+        latest_tag=$(git describe --tags --abbrev=0 2>/dev/null)
+        if [ -z "$latest_tag" ]; then
+          new_version="0.1.0"
+        else
+          version=$(echo $latest_tag | sed 's/^v//')
+          IFS='.' read -ra version_parts <<< "$version"
+          new_patch_version=$((${version_parts[2]}+1))
+          new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
+        fi
         echo "::set-output name=new_version::$new_version"
     
     - name: Create Pre-Release Tag
