@@ -6,6 +6,7 @@ on:
       - main
 
 jobs:
+
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,67 +21,76 @@ jobs:
             pyinstaller_os: 'Windows'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0  # Ensures the full Git history is available
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
-
-      - name: Install PyInstaller
-        run: pip install pyinstaller
-
-      - name: Build executable
-        run: |
-          pyinstaller --noconfirm --onefile simulator/main.py
-        shell: bash
-
-      - name: Rename executable for Windows
-        if: matrix.os == 'windows-latest'
-        run: |
-          mv dist/main.exe dist/main${{ matrix.extension }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: tsunami_simulator-${{ matrix.pyinstaller_os }}
-          path: dist/main${{ matrix.extension }}
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Install PyInstaller
+      run: pip install pyinstaller
+    
+    - name: Build executable
+      run: |
+        pyinstaller --noconfirm --onefile simulator/main.py
+      shell: bash
+    
+    - name: Rename executable for Windows
+      if: matrix.os == 'windows-latest'
+      run: |
+        mv dist/main.exe dist/main${{ matrix.extension }}
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: tsunami_simulator-${{ matrix.pyinstaller_os }}
+        path: dist/main${{ matrix.extension }}
 
   release:
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0  
-
-      - name: Download Linux Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: tsunami_simulator-Linux
-          path: artifacts/linux
-
-      - name: Download Windows Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: tsunami_simulator-Windows
-          path: artifacts/windows
-
-      - name: Create Tag
-        run: |
-          git tag -a v${{ github.run_number }} -m "Release v${{ github.run_number }}"
-          git push origin --tags
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            artifacts/linux/main
-            artifacts/windows/main.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Get latest tag
+      id: get_tag
+      run: |
+        latest_tag=$(git describe --tags --abbrev=0)
+        version=$(echo $latest_tag | sed 's/^v//')
+        IFS='.' read -ra version_parts <<< "$version"
+        new_patch_version=$((${version_parts[2]}+1))
+        new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
+        echo "::set-output name=new_version::$new_version"
+    
+    - name: Create Pre-Release Tag
+      run: |
+        git tag v${{ steps.get_tag.outputs.new_version }}
+        git push origin v${{ steps.get_tag.outputs.new_version }}
+    
+    - name: Download Linux Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tsunami_simulator-Linux
+        path: artifacts/linux
+    
+    - name: Download Windows Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tsunami_simulator-Windows
+        path: artifacts/windows
+    
+    - name: Create Pre-Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.get_tag.outputs.new_version }}
+        draft: false
+        prerelease: true
+        files: |
+          artifacts/linux/main
+          artifacts/windows/main.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
