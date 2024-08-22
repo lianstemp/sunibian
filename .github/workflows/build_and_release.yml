@@ -18,95 +18,83 @@ jobs:
           - os: windows-latest
             extension: '.exe'
             pyinstaller_os: 'Windows'
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+    - name: Install PyInstaller
+      run: pip install pyinstaller
 
-      - name: Build executable
-        run: |
-          pyinstaller --noconfirm --onefile simulator/main.py
-        shell: bash
+    - name: Build executable
+      run: pyinstaller --noconfirm --onefile simulator/main.py
+      shell: bash
 
-      - name: Rename executable
-        run: |
-          mv dist/main dist/simulator${{ matrix.extension }}
-        shell: bash
+    - name: Rename executable
+      run: mv dist/main dist/simulator${{ matrix.extension }}
+      shell: bash
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: tsunami_simulator-${{ matrix.pyinstaller_os }}
-          path: dist/simulator${{ matrix.extension }}
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: tsunami_simulator-${{ matrix.pyinstaller_os }}
+        path: dist/simulator${{ matrix.extension }}
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
 
-      - name: Get latest tag or set initial version
-        id: get_tag
-        run: |
-          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          if [ "$latest_tag" = "v0.0.0" ]; then
-            new_version="0.1.0"
-          else
-            version=$(echo $latest_tag | sed 's/^v//')
-            IFS='.' read -ra version_parts <<< "$version"
-            new_patch_version=$((${version_parts[2]}+1))
-            new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
-          fi
-          echo "New version: $new_version"
-          echo "::set-output name=new_version::$new_version"
+    - name: Get latest tag and increment version
+      id: get_version
+      run: |
+        git fetch --tags
+        latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        version=$(echo $latest_tag | sed 's/^v//')
+        IFS='.' read -ra version_parts <<< "$version"
+        new_patch_version=$((${version_parts[2]}+1))
+        new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
+        echo "New version: $new_version"
+        echo "new_version=$new_version" >> $GITHUB_OUTPUT
 
-      - name: Create Pre-Release Tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git fetch --tags
-          existing_tag=$(git tag -l "v${{ steps.get_tag.outputs.new_version }}")
-          if [ -n "$existing_tag" ]; then
-            version=$(echo $existing_tag | sed 's/^v//')
-            IFS='.' read -ra version_parts <<< "$version"
-            new_patch_version=$((${version_parts[2]}+1))
-            new_version="${version_parts[0]}.${version_parts[1]}.$new_patch_version"
-            git tag v$new_version
-            git push origin v$new_version
-          else
-            git tag v${{ steps.get_tag.outputs.new_version }}
-            git push origin v${{ steps.get_tag.outputs.new_version }}
+    - name: Create Release Tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git tag v${{ steps.get_version.outputs.new_version }}
+        git push origin v${{ steps.get_version.outputs.new_version }}
 
-      - name: Download Linux Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: tsunami_simulator-Linux
-          path: artifacts/linux
+    - name: Download Linux Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tsunami_simulator-Linux
+        path: artifacts/linux
 
-      - name: Download Windows Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: tsunami_simulator-Windows
-          path: artifacts/windows
+    - name: Download Windows Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: tsunami_simulator-Windows
+        path: artifacts/windows
 
-      - name: Create Pre-Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: v${{ steps.get_tag.outputs.new_version }}
-          draft: false
-          prerelease: true
-          files: |
-            artifacts/linux/simulator.bin
-            artifacts/windows/simulator.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.get_version.outputs.new_version }}
+        draft: false
+        prerelease: true
+        files: |
+          artifacts/linux/simulator.bin
+          artifacts/windows/simulator.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
