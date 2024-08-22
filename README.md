@@ -60,8 +60,8 @@ To get started with our Smart Tsunami Mitigation system, follow these steps:
 
 1. Clone the repository:
    ```
-   git clone https://github.com/your-username/smart-tsunami-mitigation.git
-   cd smart-tsunami-mitigation
+   git clone https://github.com/lianstemp/sunibian.git
+   cd sunibian
    ```
 
 2. Set up a virtual environment (recommended):
