@@ -1,19 +1,20 @@
-#ML.py
 import paho.mqtt.client as mqtt
 import json
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from collections import deque
 import threading
 import time
 import os
+from datetime import datetime
 
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -21,7 +22,7 @@ MQTT_TOPIC = "sensor/sunibian/data"
 
 SEQUENCE_LENGTH = 50
 PREDICTION_LENGTH = 10
-FEATURES = ['distance', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'intensity']
+FEATURES = ['timestamp', 'distance', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'intensity']
 
 DATA_FILE = "sensor_data.csv"
 MODEL_FILE = "tsunami_model.keras"
@@ -39,7 +40,9 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     data = json.loads(msg.payload.decode())
+    timestamp = datetime.strptime(data['timestamp'], "%Y-%m-%d %H:%M:%S")
     processed_data = [
+        timestamp.timestamp(),
         data['distance'],
         data['accel']['x'],
         data['accel']['y'],
@@ -66,7 +69,9 @@ def save_data(data):
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE, header=None, names=FEATURES).values.tolist()
+        df = pd.read_csv(DATA_FILE, header=None, names=FEATURES)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        return df.values.tolist()
     return []
 
 def preprocess_data(data):
@@ -81,17 +86,19 @@ def preprocess_data(data):
     X, y = [], []
     for i in range(len(scaled_data) - SEQUENCE_LENGTH - PREDICTION_LENGTH):
         X.append(scaled_data[i:(i + SEQUENCE_LENGTH)])
-        y.append(scaled_data[i + SEQUENCE_LENGTH:i + SEQUENCE_LENGTH + PREDICTION_LENGTH, 0])
+        y.append(scaled_data[i + SEQUENCE_LENGTH:i + SEQUENCE_LENGTH + PREDICTION_LENGTH, 1])  # Predicting 'distance'
     return np.array(X), np.array(y)
 
 def create_model(input_shape):
     model = Sequential([
-        LSTM(100, return_sequences=True, input_shape=input_shape),
+        Bidirectional(LSTM(128, return_sequences=True), input_shape=input_shape),
         Dropout(0.2),
-        LSTM(100, return_sequences=True),
+        Bidirectional(LSTM(64, return_sequences=True)),
         Dropout(0.2),
-        LSTM(100),
+        Bidirectional(LSTM(32)),
         Dropout(0.2),
+        Dense(64, activation='relu'),
+        Dense(32, activation='relu'),
         Dense(PREDICTION_LENGTH)
     ])
     model.compile(optimizer=Adam(learning_rate=0.001), loss=MeanSquaredError())
@@ -102,7 +109,18 @@ def train_model(X, y, existing_model=None):
         model = existing_model
     else:
         model = create_model((X.shape[1], X.shape[2]))
-    history = model.fit(X, y, epochs=10, batch_size=32, validation_split=0.2, verbose=1)
+    
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    model_checkpoint = ModelCheckpoint(MODEL_FILE, save_best_only=True, monitor='val_loss')
+    
+    history = model.fit(
+        X, y,
+        epochs=50,
+        batch_size=32,
+        validation_split=0.2,
+        verbose=1,
+        callbacks=[early_stopping, model_checkpoint]
+    )
     return model, history
 
 def predict_tsunami(model, data):
@@ -110,31 +128,36 @@ def predict_tsunami(model, data):
     X = scaled_data[-SEQUENCE_LENGTH:].reshape(1, SEQUENCE_LENGTH, len(FEATURES))
     prediction = model.predict(X)
     zeros_array = np.zeros((prediction.shape[0], prediction.shape[1], len(FEATURES)-1))
-    full_prediction = np.concatenate((prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)
-    return scaler.inverse_transform(full_prediction)[0, :, 0]
+    full_prediction = np.concatenate((np.zeros((prediction.shape[0], prediction.shape[1], 1)), prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)
+    return scaler.inverse_transform(full_prediction)[0, :, 1]
 
 def update_plot(frame):
     if len(collected_data) > SEQUENCE_LENGTH:
         df = pd.DataFrame(collected_data, columns=FEATURES)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         
         ax1.clear()
-        for feature in FEATURES:
-            ax1.plot(df[feature].values[-200:], label=feature)
+        for feature in FEATURES[1:]:  # Exclude timestamp from this plot
+            ax1.plot(df['timestamp'].values[-200:], df[feature].values[-200:], label=feature)
         ax1.set_title("Real-time Sensor Data")
         ax1.set_xlabel("Time")
         ax1.set_ylabel("Value")
         ax1.legend(loc='upper left', bbox_to_anchor=(1, 1))
+        ax1.tick_params(axis='x', rotation=45)
         
         if hasattr(update_plot, 'model'):
             try:
                 prediction = predict_tsunami(update_plot.model, collected_data[-SEQUENCE_LENGTH:])
                 ax2.clear()
-                ax2.plot(range(SEQUENCE_LENGTH), df['distance'].values[-SEQUENCE_LENGTH:], label='Actual')
-                ax2.plot(range(SEQUENCE_LENGTH, SEQUENCE_LENGTH+PREDICTION_LENGTH), prediction, label='Predicted')
+                actual_times = df['timestamp'].values[-SEQUENCE_LENGTH:]
+                predicted_times = pd.date_range(start=actual_times[-1], periods=PREDICTION_LENGTH+1, freq='S')[1:]
+                ax2.plot(actual_times, df['distance'].values[-SEQUENCE_LENGTH:], label='Actual')
+                ax2.plot(predicted_times, prediction, label='Predicted')
                 ax2.set_title("Tsunami Prediction")
                 ax2.set_xlabel("Time")
                 ax2.set_ylabel("Water Level")
                 ax2.legend()
+                ax2.tick_params(axis='x', rotation=45)
             except Exception as e:
                 print(f"Error in prediction: {e}")
         
@@ -161,14 +184,13 @@ def training_thread():
                 else:
                     model, history = train_model(X, y)
                 
-                model.save(MODEL_FILE)
                 update_plot.model = model
                 update_plot.history = history
                 print("Model trained and saved successfully.")
             except Exception as e:
                 print(f"Error in training: {e}")
         
-        time.sleep(60)
+        time.sleep(300)  # Train every 5 minutes
 
 if __name__ == "__main__":
     collected_data = load_data()

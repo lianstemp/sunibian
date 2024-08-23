@@ -1,4 +1,3 @@
-#simulator.py
 import paho.mqtt.client as mqtt
 import json
 import random
@@ -6,6 +5,8 @@ import tkinter as tk
 from tkinter import ttk
 import math
 import numpy as np
+import time
+from datetime import datetime
 
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -129,6 +130,7 @@ def generate_data(water_height, earthquake_intensity):
     gyro_z = random.gauss(0, 5 + earthquake_intensity * 50)
     
     data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "distance": distance,
         "accel": {
             "x": accel_x,
@@ -156,59 +158,78 @@ client.connect(MQTT_BROKER, MQTT_PORT, 60)
 client.loop_start()
 
 earthquake_intensity = 0
-time = 0
+simulation_time = 0
 tsunami_phase = 0
 tsunami_active = False
 tsunami_wave_position = box_width
 magnitude = 0
+initial_water_height = water_height
+tsunami_stages = {
+    "initial_quake": (0, 100),
+    "water_recession": (100, 300),
+    "tsunami_wave": (300, 600),
+    "flooding": (600, 800),
+    "water_retreat": (800, 1000)
+}
 
 def update_simulation():
-    global particles, earthquake_intensity, time, water_height, tsunami_phase, tsunami_active, tsunami_wave_position, magnitude
+    global particles, earthquake_intensity, simulation_time, water_height, tsunami_phase, tsunami_active, tsunami_wave_position, magnitude, initial_water_height
 
-    time += 0.1
+    simulation_time += 0.1
     
     if tsunami_active:
-        if tsunami_phase < 200:
-            water_height = max(50, 200 - tsunami_phase)
-            earthquake_intensity = 0.5 + (tsunami_phase / 200) * 1.5
-            tsunami_phase += 1
-        elif tsunami_phase < 400:
-            tsunami_wave_position = max(0, box_width - (tsunami_phase - 200) * 3)
-            earthquake_intensity = 2
-            tsunami_phase += 1
-        elif tsunami_phase < 600:
+        if tsunami_phase < tsunami_stages["initial_quake"][1]:
+            earthquake_intensity = min(2, earthquake_intensity + 0.02)
+            magnitude = earthquake_intensity * 5
+        elif tsunami_phase < tsunami_stages["water_recession"][1]:
+            water_height = max(initial_water_height * 0.8, initial_water_height - (tsunami_phase - tsunami_stages["water_recession"][0]) * 0.2)
+            earthquake_intensity = max(0, earthquake_intensity - 0.01)
+        elif tsunami_phase < tsunami_stages["tsunami_wave"][1]:
+            tsunami_wave_position = max(0, box_width - (tsunami_phase - tsunami_stages["tsunami_wave"][0]) * 3)
+            earthquake_intensity = min(1, earthquake_intensity + 0.005)
+        elif tsunami_phase < tsunami_stages["flooding"][1]:
             tsunami_wave_position = 0
-            water_height = min(550, 50 + (tsunami_phase - 400) * 2.5)
-            earthquake_intensity = 2 - ((tsunami_phase - 400) / 200) * 1.5
-            tsunami_phase += 1
+            water_height = min(400, water_height + (tsunami_phase - tsunami_stages["flooding"][0]) * 0.8)
+            earthquake_intensity = max(0, earthquake_intensity - 0.005)
+        elif tsunami_phase < tsunami_stages["water_retreat"][1]:
+            water_height = max(initial_water_height, water_height - (tsunami_phase - tsunami_stages["water_retreat"][0]) * 0.3)
+            earthquake_intensity = max(0, earthquake_intensity - 0.002)
         else:
             tsunami_active = False
             tsunami_phase = 0
             tsunami_wave_position = box_width
             earthquake_intensity = 0
             magnitude = 0
+            water_height = initial_water_height
+        
+        tsunami_phase += 1
     
     wave_height = water_height
     x = np.linspace(0, box_width, 200)
     
-    y_water = box_height - wave_height + np.sin(x/100 + time) * 10
-    y_water += np.sin(x/50 - time*1.5) * 5
-    y_water += np.sin(x/25 + time*2) * 3
+    y_water = box_height - wave_height + np.sin(x/100 + simulation_time) * 10
+    y_water += np.sin(x/50 - simulation_time*1.5) * 5
+    y_water += np.sin(x/25 + simulation_time*2) * 3
     
     if tsunami_active:
-        if tsunami_phase < 200:
-            y_water -= (200 - tsunami_phase) * 0.5
-        elif tsunami_phase < 400:
-            tsunami_wave = np.exp(-(x - tsunami_wave_position)**2 / (2 * 50000)) * 300
-            y_water += tsunami_wave
-        else:
-            y_water += (550 - water_height) * np.exp(-(x - tsunami_wave_position)**2 / (2 * 100000))
+        if tsunami_stages["water_recession"][0] <= tsunami_phase < tsunami_stages["tsunami_wave"][0]:
+            recession_progress = (tsunami_phase - tsunami_stages["water_recession"][0]) / (tsunami_stages["tsunami_wave"][0] - tsunami_stages["water_recession"][0])
+            recession = 30 * np.sin(recession_progress * np.pi)
+            y_water += recession * np.exp(-(x - box_width)**2 / (2 * 300000))
+        elif tsunami_stages["tsunami_wave"][0] <= tsunami_phase < tsunami_stages["flooding"][1]:
+            wave_progress = (tsunami_phase - tsunami_stages["tsunami_wave"][0]) / (tsunami_stages["flooding"][0] - tsunami_stages["tsunami_wave"][0])
+            wave_height = 150 * (1 - np.exp(-wave_progress * 5))
+            tsunami_wave = wave_height * np.exp(-(x - tsunami_wave_position)**2 / (2 * 50000))
+            y_water -= tsunami_wave
+        elif tsunami_stages["flooding"][0] <= tsunami_phase:
+            flooding_progress = (tsunami_phase - tsunami_stages["flooding"][0]) / (tsunami_stages["water_retreat"][0] - tsunami_stages["flooding"][0])
+            flooding = 180 * (1 - np.exp(-flooding_progress * 3))
+            y_water -= flooding * np.exp(-(x - 0)**2 / (2 * 1000000))
     
     sea_points = list(zip(x, y_water))
     sea_points = [(0, box_height)] + sea_points + [(box_width, box_height)]
     canvas.coords(sea_polygon, *[coord for point in sea_points for coord in point])
     
-    # Update particle positions
     for particle in particles:
         x1, y1, x2, y2 = canvas.coords(particle)
         center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
@@ -218,7 +239,7 @@ def update_simulation():
         dy = (wave_height_at_x - center_y) * 0.1
         dx = np.random.normal(0, earthquake_intensity * 5 + (tsunami_active * 10))
 
-        if tsunami_active and tsunami_phase >= 200:
+        if tsunami_active and tsunami_phase >= tsunami_stages["tsunami_wave"][0]:
             dx -= 5
 
         new_x = center_x + dx
@@ -305,7 +326,6 @@ intensity_slider.pack()
 
 tsunami_button = tk.Button(control_panel, text="Trigger Tsunami", command=trigger_tsunami)
 tsunami_button.pack(pady=10)
-
 root.after(1000, send_data)
 root.after(50, update_simulation)
 
