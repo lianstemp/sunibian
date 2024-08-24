@@ -129,8 +129,10 @@ def generate_data(water_height, earthquake_intensity):
     gyro_y = random.gauss(0, 5 + earthquake_intensity * 50)
     gyro_z = random.gauss(0, 5 + earthquake_intensity * 50)
     
+    timestamp = datetime.now().timestamp()
+    
     data = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": int(timestamp),
         "distance": distance,
         "accel": {
             "x": accel_x,

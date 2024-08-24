@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
+from tensorflow.keras.layers import GRU, Dense, Dropout, Bidirectional
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
@@ -40,7 +40,7 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     data = json.loads(msg.payload.decode())
-    timestamp = datetime.strptime(data['timestamp'], "%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.fromtimestamp(data['timestamp'])
     processed_data = [
         timestamp.timestamp(),
         data['distance'],
@@ -76,26 +76,36 @@ def load_data():
 
 def preprocess_data(data):
     global scaler
+    df = pd.DataFrame(data, columns=FEATURES)
+    
+    # Remove the timestamp column for numerical processing
+    numerical_data = df.drop(columns=['timestamp'])
+
+    # Load existing scaler or fit a new one
     if os.path.exists(SCALER_FILE):
         scaler = pd.read_pickle(SCALER_FILE)
     else:
-        scaler.fit(data)
+        scaler.fit(numerical_data)
         pd.to_pickle(scaler, SCALER_FILE)
-    
-    scaled_data = scaler.transform(data)
+
+    # Scale the numerical data
+    scaled_data = scaler.transform(numerical_data)
+
+    # Prepare sequences for model training
     X, y = [], []
     for i in range(len(scaled_data) - SEQUENCE_LENGTH - PREDICTION_LENGTH):
         X.append(scaled_data[i:(i + SEQUENCE_LENGTH)])
-        y.append(scaled_data[i + SEQUENCE_LENGTH:i + SEQUENCE_LENGTH + PREDICTION_LENGTH, 1])  # Predicting 'distance'
+        y.append(scaled_data[i + SEQUENCE_LENGTH:i + SEQUENCE_LENGTH + PREDICTION_LENGTH, 0])  # Predicting 'distance'
+    
     return np.array(X), np.array(y)
 
 def create_model(input_shape):
     model = Sequential([
-        Bidirectional(LSTM(128, return_sequences=True), input_shape=input_shape),
+        Bidirectional(GRU(128, return_sequences=True), input_shape=input_shape),
         Dropout(0.2),
-        Bidirectional(LSTM(64, return_sequences=True)),
+        Bidirectional(GRU(64, return_sequences=True)),
         Dropout(0.2),
-        Bidirectional(LSTM(32)),
+        Bidirectional(GRU(32)),
         Dropout(0.2),
         Dense(64, activation='relu'),
         Dense(32, activation='relu'),
@@ -124,45 +134,59 @@ def train_model(X, y, existing_model=None):
     return model, history
 
 def predict_tsunami(model, data):
-    scaled_data = scaler.transform(data)
-    X = scaled_data[-SEQUENCE_LENGTH:].reshape(1, SEQUENCE_LENGTH, len(FEATURES))    
+    # Ensure that only numerical data is passed for scaling
+    numerical_data = pd.DataFrame(data, columns=FEATURES).drop(columns=['timestamp'])
+    scaled_data = scaler.transform(numerical_data)
+    
+    X = scaled_data[-SEQUENCE_LENGTH:].reshape(1, SEQUENCE_LENGTH, len(FEATURES) - 1)  # Adjusted for no timestamp
     prediction = model.predict(X)
-    zeros_array = np.zeros((prediction.shape[0], prediction.shape[1], len(FEATURES) - 1))
-    full_prediction = np.concatenate((prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)    
-    full_prediction_2d = full_prediction.reshape(-1, len(FEATURES))
+
+    # Reconstruct full prediction for inverse scaling
+    zeros_array = np.zeros((prediction.shape[0], prediction.shape[1], len(FEATURES) - 2))  # Adjusted for no timestamp
+    full_prediction = np.concatenate((prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)
+    
+    # Reshape and inverse transform
+    full_prediction_2d = full_prediction.reshape(-1, len(FEATURES) - 1)
     inverted_full_prediction = scaler.inverse_transform(full_prediction_2d)
-    final_prediction = inverted_full_prediction[:, 1].reshape(prediction.shape[0], prediction.shape[1])
+
+    # Extract final predictions for 'distance'
+    final_prediction = inverted_full_prediction[:, 0].reshape(prediction.shape[0], prediction.shape[1])  # 'distance' is first feature
     return final_prediction
+
 
 def update_plot(frame):
     if len(collected_data) > SEQUENCE_LENGTH:
         df = pd.DataFrame(collected_data, columns=FEATURES)
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         
+        # Pastikan 'timestamp' sudah dalam format datetime
+        if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+        
+        # Hapus baris yang memiliki nilai NaT di kolom timestamp
+        df = df.dropna(subset=['timestamp'])
+
         ax1.clear()
-        for feature in FEATURES[1:]:  # Exclude timestamp from this plot
+        for feature in FEATURES[1:]:
             ax1.plot(df['timestamp'].values[-200:], df[feature].values[-200:], label=feature)
         ax1.set_title("Real-time Sensor Data")
         ax1.set_xlabel("Time")
         ax1.set_ylabel("Value")
         ax1.legend(loc='upper left', bbox_to_anchor=(1, 1))
         ax1.tick_params(axis='x', rotation=45)
-        
+
         if hasattr(update_plot, 'model'):
             try:
                 prediction = predict_tsunami(update_plot.model, collected_data[-SEQUENCE_LENGTH:])
                 prediction = prediction.flatten()
 
                 actual_times = df['timestamp'].values[-SEQUENCE_LENGTH:]
-                predicted_times = pd.date_range(start=actual_times[-1], periods=PREDICTION_LENGTH+1, freq='s')[1:]
+                predicted_times = pd.date_range(start=actual_times[-1], periods=PREDICTION_LENGTH + 1, freq='s')[1:]
 
                 if len(predicted_times) == prediction.shape[0]:
                     ax2.clear()
                     ax2.plot(actual_times, df['distance'].values[-SEQUENCE_LENGTH:], label='Actual')
                     ax2.plot(predicted_times, prediction, label='Predicted')
-                else:
-                    print(f"Shape mismatch: predicted_times {predicted_times.shape} and prediction {prediction.shape}")
-                    
+                
                 ax2.set_title("Tsunami Prediction")
                 ax2.set_xlabel("Time")
                 ax2.set_ylabel("Water Level")
@@ -170,7 +194,7 @@ def update_plot(frame):
                 ax2.tick_params(axis='x', rotation=45)
             except Exception as e:
                 print(f"Error in prediction: {e}")
-        
+
         if hasattr(update_plot, 'history'):
             ax3.clear()
             ax3.plot(update_plot.history.history['loss'], label='Training Loss')
@@ -200,7 +224,7 @@ def training_thread():
             except Exception as e:
                 print(f"Error in training: {e}")
         
-        time.sleep(300)  # Train every 5 minutes
+        time.sleep(300)
 
 if __name__ == "__main__":
     collected_data = load_data()
