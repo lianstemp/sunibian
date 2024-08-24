@@ -6,6 +6,12 @@ import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import LSTM, Dense, Input
+from tensorflow.keras.optimizers import Adam
+from sklearn.preprocessing import StandardScaler
+import os
 
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -13,31 +19,87 @@ MQTT_TOPIC = "sensor/sunibian/data"
 
 WINDOW_SIZE = 60
 FEATURES = ['timestamp', 'distance', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'intensity']
+MODEL_PATH = "tsunami_detection_model.keras"
+SCALER_PATH = "scaler.npy"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 data_buffer = deque(maxlen=WINDOW_SIZE)
+scaler = StandardScaler()
 
 plt.style.use('dark_background')
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
 plt.subplots_adjust(hspace=0.4)
 
-WATER_RECEDING_THRESHOLD = 20
-ACCELERATION_THRESHOLD = 0.5
-GYRO_THRESHOLD = 5
-INTENSE_SEISMIC_THRESHOLD = 2.0
+class AdaptiveThresholdDetector:
+    def __init__(self, window_size=60, z_threshold=3):
+        self.window_size = window_size
+        self.z_threshold = z_threshold
+        self.water_levels = deque(maxlen=window_size)
+        self.seismic_intensities = deque(maxlen=window_size)
 
-baseline_water_level = None
-water_level_samples = deque(maxlen=30)
-receding_water_detected = False
-intense_seismic_activity_detected = False
+    def update(self, water_level, seismic_intensity):
+        self.water_levels.append(water_level)
+        self.seismic_intensities.append(seismic_intensity)
 
-def on_connect(client, userdata, flags, rc):
+    def detect_anomaly(self):
+        if len(self.water_levels) < self.window_size:
+            return False, 0, 0
+
+        water_mean = np.mean(self.water_levels)
+        water_std = np.std(self.water_levels)
+        seismic_mean = np.mean(self.seismic_intensities)
+        seismic_std = np.std(self.seismic_intensities)
+
+        current_water = self.water_levels[-1]
+        current_seismic = self.seismic_intensities[-1]
+
+        water_z_score = (current_water - water_mean) / water_std if water_std > 0 else 0
+        seismic_z_score = (current_seismic - seismic_mean) / seismic_std if seismic_std > 0 else 0
+
+        is_anomaly = abs(water_z_score) > self.z_threshold or abs(seismic_z_score) > self.z_threshold
+        return is_anomaly, water_z_score, seismic_z_score
+
+detector = AdaptiveThresholdDetector()
+
+def create_model():
+    model = Sequential([
+        Input(shape=(WINDOW_SIZE, len(FEATURES)-1)),
+        LSTM(64, return_sequences=True),
+        LSTM(32, return_sequences=True),
+        Dense(16, activation='relu'),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy')
+    return model
+
+def load_or_create_model():
+    global scaler
+    if os.path.exists(MODEL_PATH):
+        logging.info("Loading existing model...")
+        model = load_model(MODEL_PATH)
+        if os.path.exists(SCALER_PATH):
+            scaler = StandardScaler()
+            scaler.mean_ = np.load(SCALER_PATH, allow_pickle=True).item().get('mean')
+            scaler.scale_ = np.load(SCALER_PATH, allow_pickle=True).item().get('scale')
+        logging.info("Model and scaler loaded successfully.")
+    else:
+        logging.info("Creating new model...")
+        model = create_model()
+    return model
+
+model = load_or_create_model()
+
+def save_model_and_scaler():
+    model.save(MODEL_PATH)
+    np.save(SCALER_PATH, {'mean': scaler.mean_, 'scale': scaler.scale_})
+    logging.info("Model and scaler saved successfully.")
+
+def on_connect(client, userdata, flags, rc, properties=None):
     logging.info(f"Connected with result code {rc}")
     client.subscribe(MQTT_TOPIC)
 
 def on_message(client, userdata, msg):
-    global baseline_water_level
     try:
         data = json.loads(msg.payload.decode())
         timestamp = datetime.fromtimestamp(data['timestamp'])
@@ -53,85 +115,129 @@ def on_message(client, userdata, msg):
             data['intensity']
         ]
         data_buffer.append(processed_data)
-        water_level_samples.append(data['distance'])
         
-        logging.info(f"Data received - Timestamp: {timestamp}, Distance: {data['distance']:.2f}")
+        detector.update(data['distance'], data['intensity'])
         
-        if baseline_water_level is None and len(water_level_samples) == water_level_samples.maxlen:
-            baseline_water_level = np.mean(water_level_samples)
-            logging.info(f"Baseline water level set: {baseline_water_level:.2f}")
+        logging.info(f"Data received - Timestamp: {timestamp}, Distance: {data['distance']:.2f}, Intensity: {data['intensity']:.2f}")
         
-        detect_tsunami_precursors()
+        if len(data_buffer) == WINDOW_SIZE:
+            update_model()
+            predict_tsunami_risk()
+            save_model_and_scaler()
     except Exception as e:
-        logging.error(f"Error processing message: {e}")
+        logging.error(f"Error processing message: {str(e)}")
 
-def detect_tsunami_precursors():
-    global receding_water_detected, intense_seismic_activity_detected, baseline_water_level
-    
-    if baseline_water_level is None:
-        return
-    
-    current_water_level = np.mean(list(water_level_samples)[-10:])
-    water_level_change = baseline_water_level - current_water_level
-    if water_level_change > WATER_RECEDING_THRESHOLD and not receding_water_detected:
-        logging.warning(f"Water receding detected: {water_level_change:.2f} meters")
-        receding_water_detected = True
-    
-    if len(data_buffer) > 0:
-        current_data = np.array([d[1:] for d in data_buffer])
-        accel_magnitude = np.linalg.norm(current_data[:, 1:4], axis=1)
-        max_accel_magnitude = np.max(accel_magnitude)
+def update_model():
+    global scaler, model
+    try:
+        X = np.array([d[1:] for d in data_buffer])
+        scaler.fit(X)
+        X_scaled = scaler.transform(X)
         
-        if max_accel_magnitude > INTENSE_SEISMIC_THRESHOLD and not intense_seismic_activity_detected:
-            logging.warning(f"Intense seismic activity detected: {max_accel_magnitude:.2f} m/s^2")
-            intense_seismic_activity_detected = True
-    
-    if receding_water_detected and intense_seismic_activity_detected:
-        logging.critical("TSUNAMI EARLY WARNING: Water receding and intense seismic activity detected!")
-    elif receding_water_detected:
-        logging.warning("POTENTIAL TSUNAMI THREAT: Water receding detected. Monitor seismic activity.")
-    elif intense_seismic_activity_detected:
-        logging.warning("POTENTIAL TSUNAMI THREAT: Intense seismic activity detected. Monitor water levels.")
+        is_anomaly, water_z, seismic_z = detector.detect_anomaly()
+        y = np.array([1 if is_anomaly else 0 for _ in range(WINDOW_SIZE)])
+        
+        X_train = X_scaled.reshape(1, WINDOW_SIZE, -1)
+        y_train = y.reshape(1, WINDOW_SIZE, 1)
+        
+        history = model.fit(X_train, y_train, epochs=1, verbose=0)
+        logging.info(f"Model updated - Loss: {history.history['loss'][0]:.4f}")
+    except Exception as e:
+        logging.error(f"Error updating model: {str(e)}")
 
-    if water_level_change <= WATER_RECEDING_THRESHOLD / 2:
-        receding_water_detected = False
-    if len(data_buffer) > 0 and max_accel_magnitude <= INTENSE_SEISMIC_THRESHOLD / 2:
-        intense_seismic_activity_detected = False
+def predict_tsunami_risk():
+    if len(data_buffer) < WINDOW_SIZE:
+        return
+
+    try:
+        X = np.array([d[1:] for d in data_buffer])
+        X_scaled = scaler.transform(X)
+        X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
+        
+        model_predictions = model.predict(X_pred)[0]
+        model_prediction = np.mean(model_predictions)
+        
+        current_distance = data_buffer[-1][1]
+        seismic_intensity = data_buffer[-1][-1]
+        
+        is_anomaly, water_z_score, seismic_z_score = detector.detect_anomaly()
+        
+        combined_risk = max(model_prediction, abs(water_z_score) / detector.z_threshold, abs(seismic_z_score) / detector.z_threshold)
+        
+        if combined_risk > 0.8:
+            risk_level = "HIGH"
+        elif combined_risk > 0.6:
+            risk_level = "MODERATE"
+        elif combined_risk > 0.3:
+            risk_level = "LOW"
+        else:
+            risk_level = "MINIMAL"
+
+        logging.info(f"Tsunami Risk Assessment:\n"
+                     f"  Risk Level: {risk_level}\n"
+                     f"  Combined Risk: {combined_risk:.2f}\n"
+                     f"  Model Prediction: {model_prediction:.2f}\n"
+                     f"  Water Level Z-Score: {water_z_score:.2f}\n"
+                     f"  Seismic Intensity Z-Score: {seismic_z_score:.2f}\n"
+                     f"  Current Water Level: {current_distance:.2f}m\n"
+                     f"  Seismic Intensity: {seismic_intensity:.2f}")
+        
+        if risk_level == "HIGH":
+            logging.critical("IMMEDIATE ACTION REQUIRED: High probability of tsunami. Initiate evacuation protocols.")
+        elif risk_level == "MODERATE":
+            logging.warning("ALERT: Moderate tsunami risk detected. Monitor situation closely.")
+        elif risk_level == "LOW":
+            logging.info("NOTICE: Low tsunami risk detected. Continue monitoring.")
+        else:
+            logging.info("Status: Minimal risk. Normal operations.")
+    except Exception as e:
+        logging.error(f"Error predicting tsunami risk: {str(e)}")
 
 def update_plot(frame):
     if len(data_buffer) > 0:
-        data = np.array([d[1:] for d in data_buffer])
-        timestamps = [d[0] for d in data_buffer]
+        try:
+            data = np.array([d[1:] for d in data_buffer])
+            timestamps = [d[0] for d in data_buffer]
 
-        ax1.clear()
-        ax2.clear()
+            ax1.clear()
+            ax2.clear()
+            ax3.clear()
 
-        ax1.plot(timestamps, data[:, 0], label='Water Level', color='cyan')
-        ax1.set_title("Real-time Water Level")
-        ax1.set_xlabel("Time")
-        ax1.set_ylabel("Distance (m)")
-        ax1.legend()
-        ax1.grid(True, linestyle='--', alpha=0.7)
+            ax1.plot(timestamps, data[:, 0], label='Water Level', color='cyan')
+            ax1.set_title("Water Level")
+            ax1.set_xlabel("Time")
+            ax1.set_ylabel("Distance (m)")
+            ax1.legend()
+            ax1.grid(True, linestyle='--', alpha=0.7)
 
-        accel_magnitude = np.linalg.norm(data[:, 1:4].astype(float), axis=1)
-        gyro_magnitude = np.linalg.norm(data[:, 4:7].astype(float), axis=1)
-        ax2.plot(timestamps, accel_magnitude, label='Acceleration Magnitude', color='red')
-        ax2.plot(timestamps, gyro_magnitude, label='Gyroscope Magnitude', color='green')
-        ax2.set_title("Seismic Activity")
-        ax2.set_xlabel("Time")
-        ax2.set_ylabel("Magnitude")
-        ax2.legend()
-        ax2.grid(True, linestyle='--', alpha=0.7)
+            accel_magnitude = np.linalg.norm(data[:, 1:4].astype(float), axis=1)
+            gyro_magnitude = np.linalg.norm(data[:, 4:7].astype(float), axis=1)
+            ax2.plot(timestamps, accel_magnitude, label='Acceleration Magnitude', color='red')
+            ax2.plot(timestamps, gyro_magnitude, label='Gyroscope Magnitude', color='green')
+            ax2.set_title("Seismic Activity")
+            ax2.set_xlabel("Time")
+            ax2.set_ylabel("Magnitude")
+            ax2.legend()
+            ax2.grid(True, linestyle='--', alpha=0.7)
 
-        if baseline_water_level is not None:
-            ax1.axhline(y=baseline_water_level, color='white', linestyle='--', label='Baseline Water Level')
-            ax1.axhline(y=baseline_water_level - WATER_RECEDING_THRESHOLD, color='yellow', linestyle='--', label='Water Receding Threshold')
-        ax2.axhline(y=INTENSE_SEISMIC_THRESHOLD, color='red', linestyle='--', label='Intense Seismic Threshold')
+            ax3.plot(timestamps, data[:, -1], label='Seismic Intensity', color='purple')
+            if len(data_buffer) == WINDOW_SIZE:
+                X_scaled = scaler.transform(data)
+                X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
+                predictions = model.predict(X_pred)[0]
+                ax3.plot(timestamps, predictions, label='Tsunami Risk', color='yellow', linestyle='--')
+            ax3.set_title("Seismic Intensity and Tsunami Risk")
+            ax3.set_xlabel("Time")
+            ax3.set_ylabel("Intensity / Risk")
+            ax3.legend()
+            ax3.grid(True, linestyle='--', alpha=0.7)
 
-        plt.tight_layout()
-
+            plt.tight_layout()
+        except Exception as e:
+            logging.error(f"Error updating plot: {str(e)}")
+            
 if __name__ == "__main__":
-    client = mqtt.Client()
+    client = mqtt.Client(protocol=mqtt.MQTTv5)
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
