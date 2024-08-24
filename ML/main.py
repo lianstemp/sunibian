@@ -11,6 +11,7 @@ from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Input
 from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import os
 
 MQTT_BROKER = "broker.hivemq.com"
@@ -28,7 +29,7 @@ data_buffer = deque(maxlen=WINDOW_SIZE)
 scaler = StandardScaler()
 
 plt.style.use('dark_background')
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
+fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 20))
 plt.subplots_adjust(hspace=0.4)
 
 class AdaptiveThresholdDetector:
@@ -60,7 +61,57 @@ class AdaptiveThresholdDetector:
         is_anomaly = abs(water_z_score) > self.z_threshold or abs(seismic_z_score) > self.z_threshold
         return is_anomaly, water_z_score, seismic_z_score
 
+class ModelEvaluator:
+    def __init__(self):
+        self.true_labels = []
+        self.predicted_labels = []
+        self.accuracy_history = []
+        self.precision_history = []
+        self.recall_history = []
+        self.f1_history = []
+
+    def update(self, true_label, predicted_label):
+        self.true_labels.append(true_label)
+        self.predicted_labels.append(predicted_label)
+
+    def evaluate(self):
+        if len(self.true_labels) < 2:  # Need at least two samples for evaluation
+            return
+
+        accuracy = accuracy_score(self.true_labels, self.predicted_labels)
+        precision = precision_score(self.true_labels, self.predicted_labels, zero_division=0)
+        recall = recall_score(self.true_labels, self.predicted_labels, zero_division=0)
+        f1 = f1_score(self.true_labels, self.predicted_labels, zero_division=0)
+
+        self.accuracy_history.append(accuracy)
+        self.precision_history.append(precision)
+        self.recall_history.append(recall)
+        self.f1_history.append(f1)
+
+        logging.info(f"Model Performance:\n"
+                     f"  Accuracy: {accuracy:.4f}\n"
+                     f"  Precision: {precision:.4f}\n"
+                     f"  Recall: {recall:.4f}\n"
+                     f"  F1-score: {f1:.4f}")
+
+    def plot_performance(self, ax):
+        ax.clear()
+        if self.accuracy_history:
+            ax.plot(self.accuracy_history, label='Accuracy')
+            ax.plot(self.precision_history, label='Precision')
+            ax.plot(self.recall_history, label='Recall')
+            ax.plot(self.f1_history, label='F1-score')
+            ax.set_title('Model Performance Over Time')
+            ax.set_xlabel('Evaluation Interval')
+            ax.set_ylabel('Score')
+            ax.legend()
+            ax.grid(True, linestyle='--', alpha=0.7)
+        else:
+            ax.text(0.5, 0.5, 'Insufficient data for performance metrics', 
+                    ha='center', va='center')
+
 detector = AdaptiveThresholdDetector()
+evaluator = ModelEvaluator()
 
 def create_model():
     model = Sequential([
@@ -79,9 +130,10 @@ def load_or_create_model():
         logging.info("Loading existing model...")
         model = load_model(MODEL_PATH)
         if os.path.exists(SCALER_PATH):
-            scaler = StandardScaler()
-            scaler.mean_ = np.load(SCALER_PATH, allow_pickle=True).item().get('mean')
-            scaler.scale_ = np.load(SCALER_PATH, allow_pickle=True).item().get('scale')
+            scaler_data = np.load(SCALER_PATH, allow_pickle=True).item()
+            scaler.mean_ = scaler_data.get('mean')
+            scaler.scale_ = scaler_data.get('scale')
+            scaler.n_samples_seen_ = scaler_data.get('n_samples_seen', 0)
         logging.info("Model and scaler loaded successfully.")
     else:
         logging.info("Creating new model...")
@@ -92,7 +144,11 @@ model = load_or_create_model()
 
 def save_model_and_scaler():
     model.save(MODEL_PATH)
-    np.save(SCALER_PATH, {'mean': scaler.mean_, 'scale': scaler.scale_})
+    np.save(SCALER_PATH, {
+        'mean': scaler.mean_ if hasattr(scaler, 'mean_') else None,
+        'scale': scaler.scale_ if hasattr(scaler, 'scale_') else None,
+        'n_samples_seen': scaler.n_samples_seen_ if hasattr(scaler, 'n_samples_seen_') else 0
+    })
     logging.info("Model and scaler saved successfully.")
 
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -131,7 +187,10 @@ def update_model():
     global scaler, model
     try:
         X = np.array([d[1:] for d in data_buffer])
-        scaler.fit(X)
+        if not hasattr(scaler, 'n_samples_seen_') or scaler.n_samples_seen_ == 0:
+            scaler.fit(X)
+        else:
+            scaler.partial_fit(X)
         X_scaled = scaler.transform(X)
         
         is_anomaly, water_z, seismic_z = detector.detect_anomaly()
@@ -151,11 +210,14 @@ def predict_tsunami_risk():
 
     try:
         X = np.array([d[1:] for d in data_buffer])
-        X_scaled = scaler.transform(X)
-        X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
-        
-        model_predictions = model.predict(X_pred)[0]
-        model_prediction = np.mean(model_predictions)
+        if hasattr(scaler, 'n_samples_seen_') and scaler.n_samples_seen_ > 0:
+            X_scaled = scaler.transform(X)
+            X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
+            
+            model_predictions = model.predict(X_pred)[0]
+            model_prediction = np.mean(model_predictions)
+        else:
+            model_prediction = 0.5  # Default prediction when scaler is not ready
         
         current_distance = data_buffer[-1][1]
         seismic_intensity = data_buffer[-1][-1]
@@ -190,6 +252,15 @@ def predict_tsunami_risk():
             logging.info("NOTICE: Low tsunami risk detected. Continue monitoring.")
         else:
             logging.info("Status: Minimal risk. Normal operations.")
+
+        true_label = 1 if is_anomaly else 0
+        predicted_label = 1 if combined_risk > 0.5 else 0
+        
+        evaluator.update(true_label, predicted_label)
+        
+        if len(evaluator.true_labels) % 100 == 0:
+            evaluator.evaluate()
+
     except Exception as e:
         logging.error(f"Error predicting tsunami risk: {str(e)}")
 
@@ -221,7 +292,7 @@ def update_plot(frame):
             ax2.grid(True, linestyle='--', alpha=0.7)
 
             ax3.plot(timestamps, data[:, -1], label='Seismic Intensity', color='purple')
-            if len(data_buffer) == WINDOW_SIZE:
+            if len(data_buffer) == WINDOW_SIZE and hasattr(scaler, 'n_samples_seen_') and scaler.n_samples_seen_ > 0:
                 X_scaled = scaler.transform(data)
                 X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
                 predictions = model.predict(X_pred)[0]
@@ -231,6 +302,8 @@ def update_plot(frame):
             ax3.set_ylabel("Intensity / Risk")
             ax3.legend()
             ax3.grid(True, linestyle='--', alpha=0.7)
+
+            evaluator.plot_performance(ax4)
 
             plt.tight_layout()
         except Exception as e:
