@@ -125,11 +125,14 @@ def train_model(X, y, existing_model=None):
 
 def predict_tsunami(model, data):
     scaled_data = scaler.transform(data)
-    X = scaled_data[-SEQUENCE_LENGTH:].reshape(1, SEQUENCE_LENGTH, len(FEATURES))
+    X = scaled_data[-SEQUENCE_LENGTH:].reshape(1, SEQUENCE_LENGTH, len(FEATURES))    
     prediction = model.predict(X)
-    zeros_array = np.zeros((prediction.shape[0], prediction.shape[1], len(FEATURES)-1))
-    full_prediction = np.concatenate((np.zeros((prediction.shape[0], prediction.shape[1], 1)), prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)
-    return scaler.inverse_transform(full_prediction)[0, :, 1]
+    zeros_array = np.zeros((prediction.shape[0], prediction.shape[1], len(FEATURES) - 1))
+    full_prediction = np.concatenate((prediction.reshape(prediction.shape[0], prediction.shape[1], 1), zeros_array), axis=2)    
+    full_prediction_2d = full_prediction.reshape(-1, len(FEATURES))
+    inverted_full_prediction = scaler.inverse_transform(full_prediction_2d)
+    final_prediction = inverted_full_prediction[:, 1].reshape(prediction.shape[0], prediction.shape[1])
+    return final_prediction
 
 def update_plot(frame):
     if len(collected_data) > SEQUENCE_LENGTH:
@@ -148,11 +151,18 @@ def update_plot(frame):
         if hasattr(update_plot, 'model'):
             try:
                 prediction = predict_tsunami(update_plot.model, collected_data[-SEQUENCE_LENGTH:])
-                ax2.clear()
+                prediction = prediction.flatten()
+
                 actual_times = df['timestamp'].values[-SEQUENCE_LENGTH:]
-                predicted_times = pd.date_range(start=actual_times[-1], periods=PREDICTION_LENGTH+1, freq='S')[1:]
-                ax2.plot(actual_times, df['distance'].values[-SEQUENCE_LENGTH:], label='Actual')
-                ax2.plot(predicted_times, prediction, label='Predicted')
+                predicted_times = pd.date_range(start=actual_times[-1], periods=PREDICTION_LENGTH+1, freq='s')[1:]
+
+                if len(predicted_times) == prediction.shape[0]:
+                    ax2.clear()
+                    ax2.plot(actual_times, df['distance'].values[-SEQUENCE_LENGTH:], label='Actual')
+                    ax2.plot(predicted_times, prediction, label='Predicted')
+                else:
+                    print(f"Shape mismatch: predicted_times {predicted_times.shape} and prediction {prediction.shape}")
+                    
                 ax2.set_title("Tsunami Prediction")
                 ax2.set_xlabel("Time")
                 ax2.set_ylabel("Water Level")
