@@ -19,17 +19,18 @@ MQTT_PORT = 1883
 MQTT_TOPIC = "sensor/sunibian/data"
 
 WINDOW_SIZE = 60
+FUTURE_PREDICT = 10  # Predict 10 steps ahead
 FEATURES = ['timestamp', 'distance', 'accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z', 'intensity']
 MODEL_PATH = "tsunami_detection_model.keras"
 SCALER_PATH = "scaler.npy"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-data_buffer = deque(maxlen=WINDOW_SIZE)
+data_buffer = deque(maxlen=WINDOW_SIZE + FUTURE_PREDICT)
 scaler = StandardScaler()
 
 plt.style.use('dark_background')
-fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 20))
+fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(5, 1, figsize=(12, 25))
 plt.subplots_adjust(hspace=0.4)
 
 class AdaptiveThresholdDetector:
@@ -89,7 +90,7 @@ class ModelEvaluator:
         self.f1_history.append(f1)
 
         logging.info(f"Model Performance:\n"
-                     f"  Accuracy: {accuracy:.4f}\n"
+                     f"  Accuracy:{accuracy:.4f}\n"
                      f"  Precision: {precision:.4f}\n"
                      f"  Recall: {recall:.4f}\n"
                      f"  F1-score: {f1:.4f}")
@@ -117,11 +118,11 @@ def create_model():
     model = Sequential([
         Input(shape=(WINDOW_SIZE, len(FEATURES)-1)),
         LSTM(64, return_sequences=True),
-        LSTM(32, return_sequences=True),
+        LSTM(32),
         Dense(16, activation='relu'),
-        Dense(1, activation='sigmoid')
+        Dense(FUTURE_PREDICT, activation='linear')  # Predict the next `FUTURE_PREDICT` steps
     ])
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy')
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
     return model
 
 def load_or_create_model():
@@ -176,7 +177,7 @@ def on_message(client, userdata, msg):
         
         logging.info(f"Data received - Timestamp: {timestamp}, Distance: {data['distance']:.2f}, Intensity: {data['intensity']:.2f}")
         
-        if len(data_buffer) == WINDOW_SIZE:
+        if len(data_buffer) >= WINDOW_SIZE + FUTURE_PREDICT:
             update_model()
             predict_tsunami_risk()
             save_model_and_scaler()
@@ -186,18 +187,19 @@ def on_message(client, userdata, msg):
 def update_model():
     global scaler, model
     try:
-        X = np.array([d[1:] for d in data_buffer])
+        X = np.array([d[1:] for d in data_buffer])[:WINDOW_SIZE]
+        Y = np.array([d[1:] for d in data_buffer])[WINDOW_SIZE:]
+        
         if not hasattr(scaler, 'n_samples_seen_') or scaler.n_samples_seen_ == 0:
             scaler.fit(X)
         else:
             scaler.partial_fit(X)
-        X_scaled = scaler.transform(X)
         
-        is_anomaly, water_z, seismic_z = detector.detect_anomaly()
-        y = np.array([1 if is_anomaly else 0 for _ in range(WINDOW_SIZE)])
+        X_scaled = scaler.transform(X)
+        Y_scaled = scaler.transform(Y)
         
         X_train = X_scaled.reshape(1, WINDOW_SIZE, -1)
-        y_train = y.reshape(1, WINDOW_SIZE, 1)
+        y_train = Y_scaled[:, 0].reshape(1, FUTURE_PREDICT)  # Only predict the water level for simplicity
         
         history = model.fit(X_train, y_train, epochs=1, verbose=0)
         logging.info(f"Model updated - Loss: {history.history['loss'][0]:.4f}")
@@ -205,26 +207,29 @@ def update_model():
         logging.error(f"Error updating model: {str(e)}")
 
 def predict_tsunami_risk():
-    if len(data_buffer) < WINDOW_SIZE:
+    if len(data_buffer) < WINDOW_SIZE + FUTURE_PREDICT:
         return
 
     try:
-        X = np.array([d[1:] for d in data_buffer])
+        X = np.array([d[1:] for d in data_buffer])[:WINDOW_SIZE]
+        
         if hasattr(scaler, 'n_samples_seen_') and scaler.n_samples_seen_ > 0:
             X_scaled = scaler.transform(X)
             X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
             
-            model_predictions = model.predict(X_pred)[0]
-            model_prediction = np.mean(model_predictions)
+            predictions = model.predict(X_pred)[0]
+            predictions_unscaled = scaler.inverse_transform(np.concatenate([predictions.reshape(-1, 1), np.zeros((FUTURE_PREDICT, X.shape[1] - 1))], axis=1))[:, 0]
+            
+            logging.info(f"Predicted future water levels: {predictions_unscaled}")
         else:
-            model_prediction = 0.5  # Default prediction when scaler is not ready
+            predictions_unscaled = np.zeros(FUTURE_PREDICT)  # Default predictions if scaler is not ready
         
         current_distance = data_buffer[-1][1]
         seismic_intensity = data_buffer[-1][-1]
         
         is_anomaly, water_z_score, seismic_z_score = detector.detect_anomaly()
         
-        combined_risk = max(model_prediction, abs(water_z_score) / detector.z_threshold, abs(seismic_z_score) / detector.z_threshold)
+        combined_risk = max(abs(water_z_score) / detector.z_threshold, abs(seismic_z_score) / detector.z_threshold)
         
         if combined_risk > 0.8:
             risk_level = "HIGH"
@@ -238,21 +243,11 @@ def predict_tsunami_risk():
         logging.info(f"Tsunami Risk Assessment:\n"
                      f"  Risk Level: {risk_level}\n"
                      f"  Combined Risk: {combined_risk:.2f}\n"
-                     f"  Model Prediction: {model_prediction:.2f}\n"
                      f"  Water Level Z-Score: {water_z_score:.2f}\n"
                      f"  Seismic Intensity Z-Score: {seismic_z_score:.2f}\n"
                      f"  Current Water Level: {current_distance:.2f}m\n"
                      f"  Seismic Intensity: {seismic_intensity:.2f}")
         
-        if risk_level == "HIGH":
-            logging.critical("IMMEDIATE ACTION REQUIRED: High probability of tsunami. Initiate evacuation protocols.")
-        elif risk_level == "MODERATE":
-            logging.warning("ALERT: Moderate tsunami risk detected. Monitor situation closely.")
-        elif risk_level == "LOW":
-            logging.info("NOTICE: Low tsunami risk detected. Continue monitoring.")
-        else:
-            logging.info("Status: Minimal risk. Normal operations.")
-
         true_label = 1 if is_anomaly else 0
         predicted_label = 1 if combined_risk > 0.5 else 0
         
@@ -265,7 +260,7 @@ def predict_tsunami_risk():
         logging.error(f"Error predicting tsunami risk: {str(e)}")
 
 def update_plot(frame):
-    if len(data_buffer) > 0:
+    if len(data_buffer) >= WINDOW_SIZE + FUTURE_PREDICT:
         try:
             data = np.array([d[1:] for d in data_buffer])
             timestamps = [d[0] for d in data_buffer]
@@ -273,9 +268,11 @@ def update_plot(frame):
             ax1.clear()
             ax2.clear()
             ax3.clear()
+            ax5.clear()
 
-            ax1.plot(timestamps, data[:, 0], label='Water Level', color='cyan')
-            ax1.set_title("Water Level")
+            ax1.plot(timestamps[:WINDOW_SIZE], data[:WINDOW_SIZE, 0], label='Actual Water Level', color='cyan')
+            ax1.plot(timestamps[WINDOW_SIZE:], data[WINDOW_SIZE:, 0], label='Predicted Water Level', color='orange')
+            ax1.set_title("Water Level Prediction")
             ax1.set_xlabel("Time")
             ax1.set_ylabel("Distance (m)")
             ax1.legend()
@@ -283,32 +280,35 @@ def update_plot(frame):
 
             accel_magnitude = np.linalg.norm(data[:, 1:4].astype(float), axis=1)
             gyro_magnitude = np.linalg.norm(data[:, 4:7].astype(float), axis=1)
-            ax2.plot(timestamps, accel_magnitude, label='Acceleration Magnitude', color='red')
-            ax2.plot(timestamps, gyro_magnitude, label='Gyroscope Magnitude', color='green')
-            ax2.set_title("Seismic Activity")
+            ax2.plot(timestamps[:WINDOW_SIZE], accel_magnitude[:WINDOW_SIZE], label='Actual Acceleration Magnitude', color='red')
+            ax2.plot(timestamps[WINDOW_SIZE:], accel_magnitude[WINDOW_SIZE:], label='Predicted Acceleration Magnitude', color='orange')
+            ax2.set_title("Seismic Activity Prediction")
             ax2.set_xlabel("Time")
             ax2.set_ylabel("Magnitude")
             ax2.legend()
             ax2.grid(True, linestyle='--', alpha=0.7)
 
-            ax3.plot(timestamps, data[:, -1], label='Seismic Intensity', color='purple')
-            if len(data_buffer) == WINDOW_SIZE and hasattr(scaler, 'n_samples_seen_') and scaler.n_samples_seen_ > 0:
-                X_scaled = scaler.transform(data)
-                X_pred = X_scaled.reshape(1, WINDOW_SIZE, -1)
-                predictions = model.predict(X_pred)[0]
-                ax3.plot(timestamps, predictions, label='Tsunami Risk', color='yellow', linestyle='--')
-            ax3.set_title("Seismic Intensity and Tsunami Risk")
+            ax3.plot(timestamps[:WINDOW_SIZE], data[:WINDOW_SIZE, -1], label='Actual Seismic Intensity', color='purple')
+            ax3.plot(timestamps[WINDOW_SIZE:], data[WINDOW_SIZE:, -1], label='Predicted Seismic Intensity', color='orange')
+            ax3.set_title("Seismic Intensity Prediction")
             ax3.set_xlabel("Time")
-            ax3.set_ylabel("Intensity / Risk")
+            ax3.set_ylabel("Intensity")
             ax3.legend()
             ax3.grid(True, linestyle='--', alpha=0.7)
+
+            accuracy = evaluator.accuracy_history[-1] if evaluator.accuracy_history else 0
+            ax5.text(0.5, 0.5, f"Accuracy: {accuracy * 100:.2f}%", 
+                    ha='center', va='center', fontsize=20, 
+                    color='green' if accuracy > 0.8 else 'red')
+            ax5.set_title("Prediction Accuracy")
+            ax5.axis('off')
 
             evaluator.plot_performance(ax4)
 
             plt.tight_layout()
         except Exception as e:
             logging.error(f"Error updating plot: {str(e)}")
-            
+
 if __name__ == "__main__":
     client = mqtt.Client(protocol=mqtt.MQTTv5)
     client.on_connect = on_connect
